@@ -82,14 +82,11 @@
 %option stack
 
 /* The '%option stack' also requests the inclusion of 
- * the yy_top_state(), however this function is not
- * currently being used. This means that the compiler
- * is complaining about the existance of this function.
- * The following option removes the yy_top_state()
- * function from the resulting c code, so the compiler 
- * no longer complains.
+ * the yy_top_state(). This function is used by the
+ * (il_state | st_state) rules handling END_TRANSITION
+ * and END_ACTION, so we must NOT set the
+ * '%option noyy_top_state' option.
  */
-%option noyy_top_state
 
 /* We will be using unput() in our flex code, so we cannot set the following option!... */
 /*
@@ -1278,8 +1275,15 @@ REPEAT				{ if (isempty_bodystate_buffer())	{unput_text(0); del_bodystate_buffer
 END_FUNCTION		yy_pop_state(); unput_text(0);
 END_FUNCTION_BLOCK	yy_pop_state(); unput_text(0);
 END_PROGRAM		yy_pop_state(); unput_text(0);
-END_TRANSITION		yy_pop_state(); unput_text(0);
-END_ACTION		yy_pop_state(); unput_text(0);
+	/* END_TRANSITION and END_ACTION only terminate an IL/ST body that was started from inside a SFC
+	 * (i.e. the previous state is sfc_state). If they show up inside the body of a Function, FB or Program
+	 * (previous state is vardecl_list_state), they are simply invalid tokens that must be handed over to
+	 * bison so it can report the error. Popping back to vardecl_list_state would make flex re-enter the
+	 * body_state on the very same END_TRANSITION/END_ACTION text, return start_IL_body_token, pop again,
+	 * and so on, forever (i.e. an infinite loop inside the lexer, while bison discards start_IL_body_token).
+	 */
+END_TRANSITION		{if (yy_top_state() == sfc_state) {yy_pop_state(); unput_text(0);} else return END_TRANSITION;}
+END_ACTION		{if (yy_top_state() == sfc_state) {yy_pop_state(); unput_text(0);} else return END_ACTION;}
 }
 
 	/* sfc_state -> pop to $previous_state (vardecl_list_state or sfc_state) */
