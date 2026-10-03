@@ -37,7 +37,8 @@
  *
  *   { "types": [ {name, kind, base_type, spec?, init?, init_ms?, values?/dims?/fields?/..., pragmas[]} ],
  *     "pous": [ {name, kind, vars[], sfc?, body_st?, body_il?, pragmas[]} ],
- *     "configuration": {name, globals[], resources: [{name, type, globals[], tasks[], instances[]}]},
+ *     "configuration": {name, globals[], resources: [{name, type, globals[], tasks[], instances[{.., fb_tasks[], connections[]}]}],
+ *                       var_config[]},
  *     "configurations": [ ... only when the source has more than one CONFIGURATION ... ],
  *     "source_map": { "<pou>/var/<name>": "file:line:col", ... } }
  *
@@ -906,6 +907,33 @@ class generate_json_c: public iterator_visitor_c {
       return res;
     }
 
+    /* resource_name '.' program_name '.' {fb_name '.'} ((variable_name [location] ':' located_var_spec_init) | (fb_name ':' fb_initialization)) */
+    json_value_c print_instance_specific_init(instance_specific_init_c *symbol) {
+      json_value_c v = json_value_c::object();
+      std::string path = iec_text(symbol->resource_name) + "." + iec_text(symbol->program_name);
+      json_value_c fbs = json_value_c::array();
+      list_c *fb_list = dynamic_cast<list_c *>(symbol->any_fb_name_list);
+      for (int i = 0; (NULL != fb_list) && (i < fb_list->n); i++) {
+        fbs.push(json_value_c::str(iec_text(fb_list->get_element(i))));
+        path += "." + iec_text(fb_list->get_element(i));
+      }
+      if (NULL != symbol->variable_name) path += "." + iec_text(symbol->variable_name);
+      v.set("path",     json_value_c::str(path));
+      v.set("resource", json_value_c::str(iec_text(symbol->resource_name)));
+      v.set("program",  json_value_c::str(iec_text(symbol->program_name)));
+      v.set("fbs",      fbs);
+      v.set("name",     (NULL != symbol->variable_name)? json_value_c::str(iec_text(symbol->variable_name)) : json_value_c::raw("null"));
+      location_c *location = dynamic_cast<location_c *>(symbol->location);
+      if (NULL != symbol->location) v.set("location", json_value_c::str(iec_text((NULL != location)? location->direct_variable : symbol->location)));
+      fb_initialization_c *fb_init = dynamic_cast<fb_initialization_c *>(symbol->initialization);
+      symbol_c *type, *init;
+      if (NULL != fb_init) {type = fb_init->function_block_type_name; init = fb_init->structure_initialization;}
+      else                 split_spec_init(symbol->initialization, type, init);
+      set_type_and_init(v, type, init);
+      map_src(pou_name + "/var_config/" + path, symbol);
+      return v;
+    }
+
   public:
     void *visit(configuration_declaration_c *symbol) {
       json_value_c conf        = json_value_c::object();
@@ -930,6 +958,16 @@ class generate_json_c: public iterator_visitor_c {
         resources.push(print_resource(NULL, "", NULL, NULL, symbol->resource_declarations));
       }
       conf.set("resources", resources);
+
+      /* VAR_CONFIG .. END_VAR */
+      json_value_c var_config = json_value_c::array();
+      instance_specific_initializations_c *inits = dynamic_cast<instance_specific_initializations_c *>(symbol->instance_specific_initializations);
+      list_c *init_list = (NULL == inits)? NULL : dynamic_cast<list_c *>(inits->instance_specific_init_list);
+      for (int i = 0; (NULL != init_list) && (i < init_list->n); i++) {
+        instance_specific_init_c *init = dynamic_cast<instance_specific_init_c *>(init_list->get_element(i));
+        if (NULL != init) var_config.push(print_instance_specific_init(init));
+      }
+      conf.set("var_config", var_config);
       conf.set("pragmas", take_pending_pragmas());
 
       if (configurations.size() == 0) configurations_first = conf;
@@ -964,6 +1002,35 @@ class generate_json_c: public iterator_visitor_c {
       p.set("type", json_value_c::str(iec_text(symbol->program_type_name)));
       p.set("task", (NULL != symbol->task_name)? json_value_c::str(iec_text(symbol->task_name)) : json_value_c::raw("null"));
       if (NULL != symbol->retain_option) p.set("option", json_value_c::str(iec_text(symbol->retain_option)));
+      /* '(' prog_conf_elements ')': fb_name WITH task_name, and the connections of the program variables */
+      json_value_c fb_tasks    = json_value_c::array();
+      json_value_c connections = json_value_c::array();
+      list_c *elements = dynamic_cast<list_c *>(symbol->prog_conf_elements);
+      for (int i = 0; (NULL != elements) && (i < elements->n); i++) {
+        symbol_c *element = elements->get_element(i);
+        json_value_c e = json_value_c::object();
+        if (NULL != dynamic_cast<fb_task_c *>(element)) {
+          fb_task_c *fb_task = dynamic_cast<fb_task_c *>(element);
+          e.set("fb",   json_value_c::str(iec_text(fb_task->fb_name)));
+          e.set("task", json_value_c::str(iec_text(fb_task->task_name)));
+          fb_tasks.push(e);
+          map_src(pou_name + "/instance/" + name + "/fb_task/" + iec_text(fb_task->fb_name), element);
+        } else if (NULL != dynamic_cast<prog_cnxn_assign_c *>(element)) {
+          prog_cnxn_assign_c *cnxn = dynamic_cast<prog_cnxn_assign_c *>(element);
+          e.set("var",    json_value_c::str(iec_text(cnxn->symbolic_variable)));
+          e.set("assign", json_value_c::str(iec_text(cnxn->prog_data_source)));
+          std::string ms = duration_ms(cnxn->prog_data_source);
+          if (!ms.empty()) e.set("assign_ms", json_value_c::raw(ms));
+          connections.push(e);
+        } else if (NULL != dynamic_cast<prog_cnxn_sendto_c *>(element)) {
+          prog_cnxn_sendto_c *cnxn = dynamic_cast<prog_cnxn_sendto_c *>(element);
+          e.set("var",    json_value_c::str(iec_text(cnxn->symbolic_variable)));
+          e.set("sendto", json_value_c::str(iec_text(cnxn->data_sink)));
+          connections.push(e);
+        }
+      }
+      p.set("fb_tasks",    fb_tasks);
+      p.set("connections", connections);
       res_instances.push(p);
       map_src(pou_name + "/instance/" + name, symbol);
       return NULL;
