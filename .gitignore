@@ -15,6 +15,7 @@ stage1_2/*.cc
 stage1_2/*.hh
 stage4/generate_iec/Makefile
 stage4/generate_c/Makefile
+stage4/generate_json/Makefile
 absyntax/Makefile
 absyntax_utils/Makefile
 stage1_2/Makefile
