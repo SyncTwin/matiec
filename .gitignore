@@ -25,3 +25,5 @@ tests/**/*.st.err
 tests/**/*.st.out
 tests/**/*.c
 tests/**/*.h
+/build-wasm/
+/wasm/
