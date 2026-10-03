@@ -1694,6 +1694,49 @@ void *visit(fb_initialization_c *symbol) {
   return NULL;
 }
 
+/* VAR_ACCESS access_declaration_list END_VAR */
+void *visit(access_declarations_c *symbol) {
+  s4o.print(s4o.indent_spaces + "VAR_ACCESS\n");
+  s4o.indent_right();
+  symbol->access_declaration_list->accept(*this);
+  s4o.indent_left();
+  s4o.print(s4o.indent_spaces + "END_VAR\n");
+  return NULL;
+}
+
+/* helper symbol for access_declarations */
+void *visit(access_declaration_list_c *symbol) {
+  return print_list(symbol, s4o.indent_spaces, ";\n" + s4o.indent_spaces, ";\n");
+}
+
+/*  access_name ':' access_path ':' non_generic_type_name [direction] */
+void *visit(access_declaration_c *symbol) {
+  symbol->access_name->accept(*this);
+  s4o.print(" : ");
+  symbol->access_path->accept(*this);
+  s4o.print(" : ");
+  symbol->type_name->accept(*this);
+  if (symbol->direction != NULL) {
+    s4o.print(" ");
+    symbol->direction->accept(*this);
+  }
+  return NULL;
+}
+
+/*  {name '.'} (variable_name | direct_variable) */
+void *visit(access_path_c *symbol) {
+  list_c *list = dynamic_cast<list_c *>(symbol->any_fb_name_list);
+  for (int i = 0; (list != NULL) && (i < list->n); i++) {
+    list->get_element(i)->accept(*this);
+    s4o.print(".");
+  }
+  symbol->variable->accept(*this);
+  return NULL;
+}
+
+void *visit(read_write_c *symbol) {s4o.print("READ_WRITE"); return NULL;}
+void *visit(read_only_c  *symbol) {s4o.print("READ_ONLY");  return NULL;}
+
 
 /***********************************/
 /* B 2.1 Instructions and Operands */

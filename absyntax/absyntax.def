@@ -999,6 +999,25 @@ SYM_REF6(instance_specific_init_c, resource_name, program_name, any_fb_name_list
 /* function_block_type_name ':=' structure_initialization */
 SYM_REF2(fb_initialization_c, function_block_type_name, structure_initialization)
 
+/* VAR_ACCESS access_declaration_list END_VAR */
+SYM_REF1(access_declarations_c, access_declaration_list)
+
+/* helper symbol for access_declarations */
+SYM_LIST(access_declaration_list_c)
+
+/*  access_name ':' access_path ':' non_generic_type_name [direction] */
+SYM_REF4(access_declaration_c, access_name, access_path, type_name, direction)
+
+/*  {name '.'} (variable_name | direct_variable)
+ *  e.g. resource_name '.' program_name '.' {fb_name '.'} variable_name, or global_var_name, or [resource_name '.'] direct_variable
+ *  NOTE: array subscripts and structure elements are not (yet) supported.
+ */
+SYM_REF2(access_path_c, any_fb_name_list, variable)
+
+/* direction: READ_WRITE | READ_ONLY */
+SYM_REF0(read_write_c)
+SYM_REF0(read_only_c)
+
 
 
 /****************************************/

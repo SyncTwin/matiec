@@ -1121,18 +1121,20 @@ typedef struct YYLTYPE {
 // helper symbol for single_resource_declaration
 %type  <list>	program_configuration_list
 %type  <leaf>	resource_name
-// %type  <leaf>	access_declarations
+%type  <leaf>	access_declarations
 // helper symbol for access_declarations
-// %type  <leaf>	access_declaration_list
-// %type  <leaf>	access_declaration
-// %type  <leaf>	access_path
+%type  <list>	access_declaration_list
+%type  <leaf>	access_declaration
+%type  <leaf>	access_path
+// helper symbol for access_declaration
+%type  <leaf>	optional_direction
 // helper symbol for access_path
 %type  <list>	any_fb_name_list
 %type  <leaf>	global_var_reference
-// %type  <leaf>	access_name
+%type  <leaf>	access_name
 %type  <leaf>	program_output_reference
 %type  <leaf>	program_name
-// %type  <leaf>	direction
+%type  <leaf>	direction
 %type  <leaf>	task_configuration
 %type  <leaf>	task_name
 %type  <leaf>	task_initialization
@@ -6126,7 +6128,7 @@ global_var_declarations_list:
 optional_access_declarations:
   // empty
 	{$$ = NULL;}
-//| access_declarations
+| access_declarations
 ;
 
 // helper symbol for configuration_declaration //
@@ -6218,58 +6220,65 @@ program_configuration_list:
 
 resource_name: identifier;
 
-/*
 access_declarations:
  VAR_ACCESS access_declaration_list END_VAR
-	{$$ = NULL;}
-// ERROR_CHECK_BEGIN //
+	{$$ = new access_declarations_c($2, locloc(@$));}
+/* ERROR_CHECK_BEGIN */
 | VAR_ACCESS END_VAR
 	{$$ = NULL; print_err_msg(locl(@1), locf(@2), "no variable declared in access variable(s) declaration."); yynerrs++;}
 | VAR_ACCESS error access_declaration_list END_VAR
 	{$$ = NULL; print_err_msg(locf(@2), locl(@2), "unexpected token after 'VAR_ACCESS' in access variable(s) declaration."); yyerrok;}
-| VAR_ACCESS access_declaration_list error END_VAR
-	{$$ = NULL; print_err_msg(locf(@1), locl(@1), "unclosed access variable(s) declaration."); yyerrok;}
 | VAR_ACCESS error END_VAR
 	{$$ = NULL; print_err_msg(locf(@2), locl(@2), "unknown error in access variable(s) declaration."); yyerrok;}
-// ERROR_CHECK_END //
+/* ERROR_CHECK_END */
 ;
 
-// helper symbol for access_declarations //
+/* helper symbol for access_declarations */
 access_declaration_list:
   access_declaration ';'
+	{$$ = new access_declaration_list_c(locloc(@$)); $$->add_element($1);}
 | access_declaration_list access_declaration ';'
-// ERROR_CHECK_BEGIN //
-| error ';'
-  {$$ = // create a new list //;
-	 print_err_msg(locf(@1), locl(@1), "invalid access variable declaration."); yyerrok;}
+	{$$ = $1; $$->add_element($2);}
+/* ERROR_CHECK_BEGIN */
 | access_declaration error
-  {$$ = // create a new list //;
+  {$$ = new access_declaration_list_c(locloc(@$));
 	 print_err_msg(locl(@1), locf(@2), "';' missing at the end of access variable declaration."); yyerrok;}
 | access_declaration_list access_declaration error
   {$$ = $1; print_err_msg(locl(@2), locf(@3), "';' missing at the end of access variable declaration."); yyerrok;}
-| access_declaration_list error ';'
-  {$$ = $1; print_err_msg(locf(@2), locl(@2), "invalid access variable declaration."); yyerrok;}
 | access_declaration_list ';'
   {$$ = $1; print_err_msg(locf(@2), locl(@2), "unexpected ';' after access variable declaration."); yynerrs++;}
-// ERROR_CHECK_END //
+/* ERROR_CHECK_END */
 ;
 
 
 access_declaration:
-  access_name ':' access_path ':' non_generic_type_name
-| access_name ':' access_path ':' non_generic_type_name direction
+  access_name ':' access_path ':' non_generic_type_name optional_direction
+	{$$ = new access_declaration_c($1, $3, $5, $6, locloc(@$));}
+;
+
+/* helper symbol for access_declaration */
+optional_direction:
+  /* empty */
+	{$$ = NULL;}
+| direction
 ;
 
 
+/* NOTE: the standard's access_path is
+ *         [resource_name '.'] direct_variable
+ *       | [resource_name '.'] [program_name '.'] {fb_name '.'} symbolic_variable
+ *       The names before the variable refer to declarations in other scopes (resources,
+ *       programs, FBs), so, as in instance_specific_init, we accept any identifiers
+ *       (any_fb_name_list). Array subscripts and structure elements are not (yet) supported.
+ */
 access_path:
-  prev_declared_direct_variable
-| prev_declared_resource_name '.' prev_declared_direct_variable
-| any_fb_name_list symbolic_variable
-| prev_declared_resource_name '.' any_fb_name_list symbolic_variable
-| prev_declared_program_name '.'  any_fb_name_list symbolic_variable
-| prev_declared_resource_name '.' prev_declared_program_name '.' any_fb_name_list symbolic_variable
+  any_fb_name_list prev_declared_direct_variable
+	{$$ = new access_path_c($1, $2, locloc(@$));}
+| any_fb_name_list direct_variable_token
+	{$$ = new access_path_c($1, new direct_variable_c($2, locloc(@2)), locloc(@$));}
+| any_fb_name_list any_identifier
+	{$$ = new access_path_c($1, $2, locloc(@$));}
 ;
-*/
 
 // helper symbol for
 //  - access_path
@@ -6309,7 +6318,7 @@ global_var_reference:
 ;
 
 
-//access_name: identifier;
+access_name: identifier;
 
 
 program_output_reference:
@@ -6331,14 +6340,12 @@ program_output_reference:
 
 program_name: identifier;
 
-/*
 direction:
   READ_WRITE
-	{$$ = NULL;}
+	{$$ = new read_write_c(locloc(@$));}
 | READ_ONLY
-	{$$ = NULL;}
+	{$$ = new read_only_c(locloc(@$));}
 ;
-*/
 
 task_configuration:
   TASK task_name task_initialization
