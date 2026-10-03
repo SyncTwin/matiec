@@ -189,6 +189,16 @@ class generate_iec_text_c: public generate_iec_c {
     void *visit(boolean_false_c *symbol) {return out.print("FALSE");}
     /* the lexical analyser strips the enclosing braces of the pragmas */
     void *visit(pragma_c *symbol)        {out.print("{"); out.print(symbol->value); return out.print("}");}
+    /* as generate_iec_c, but a pragma inside a statement list is not a statement: no ';' after it */
+    void *visit(statement_list_c *symbol) {
+      for (int i = 0; i < symbol->n; i++) {
+        symbol_c *element = symbol->get_element(i);
+        out.print(out.indent_spaces);
+        element->accept(*this);
+        out.print((NULL != dynamic_cast<pragma_c *>(element))? "\n" : ";\n");
+      }
+      return NULL;
+    }
 };
 
 
