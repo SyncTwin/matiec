@@ -68,11 +68,16 @@
 
 /* Parse command line options passed from main.c !! */
 
+/* Other stage 4 generators may re-use generate_iec_c (e.g. to print ST text) by
+ * including this file with GENERATE_IEC_NO_STAGE4_ENTRY_POINTS defined.
+ */
+#ifndef GENERATE_IEC_NO_STAGE4_ENTRY_POINTS
 int  stage4_parse_options(char *options) {return 0;}
 
 void stage4_print_options(void) {
   printf("          (no options available when generating IEC 61131-3 code)\n"); 
 }
+#endif
 
 /***********************************************************************/
 /***********************************************************************/
@@ -2167,8 +2172,10 @@ void *visit(continue_statement_c *symbol) {
 
 
 
+#ifndef GENERATE_IEC_NO_STAGE4_ENTRY_POINTS
 visitor_c *new_code_generator(stage4out_c *s4o, const char *builddir)  {return new generate_iec_c(s4o);}
 void delete_code_generator(visitor_c *code_generator) {delete code_generator;}
+#endif
 
 
 

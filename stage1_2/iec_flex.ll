@@ -1005,6 +1005,11 @@ incompl_location	%[IQM]\*
 	/* Any other pragma we find, we just pass it up to the syntax parser...   */
 	/* Note that the <body_state> state is exclusive, so we have to include it here too. */
 <body_state>{pragma}					append_bodystate_buffer(yytext); /* in body state we do not process any tokens, we simply store them for later processing! */
+	/* A pragma inside VAR .. END_VAR (e.g. {attribute 'x' := 'y'} before a variable) is not part of the grammar.
+	 * Instead of passing it to bison (which would result in a syntax error), we keep it in a side table, so that
+	 * a stage 4 may still attach it to the declaration that follows it (see stage1_2.hh).
+	 */
+<vardecl_state>{pragma}					if (!get_preparse_state()) add_var_decl_pragma(yytext, yylloc.first_order);
 {pragma}	{/* return the pragmma without the enclosing '{' and '}' */
 		 int cut = yytext[1]=='{'?2:1;
 		 yytext[strlen(yytext)-cut] = '\0';

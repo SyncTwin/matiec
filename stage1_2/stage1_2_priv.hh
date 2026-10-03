@@ -149,6 +149,9 @@ void set_preparse_state(void);
 void rst_preparse_state(void);
 bool get_preparse_state();  // returns true if bison is in preparse state
 
+/* Store a pragma found inside VAR .. END_VAR in the side table (see stage1_2.hh) */
+void add_var_decl_pragma(const char *text, long int order);
+
 /****************************************************/
 /* Controlling the entry to the body_state in flex. */
 /****************************************************/

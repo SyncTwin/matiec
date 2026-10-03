@@ -32,37 +32,19 @@
 
 
 /*
- * The public interface to stage1_2.cc 
+ * GENERATE_JSON.HH
+ *
+ * Stage 4 that prints a JSON model of the IEC 61131-3 source program
+ * (POUs, variables, SFC, configuration), instead of generating code.
  */
 
 
-
-#ifndef _STAGE1_2_HH
-#define _STAGE1_2_HH
-
+#ifndef _GENERATE_JSON_HH
+#define _GENERATE_JSON_HH
 
 
-/* This file includes the interface through which the main function accesses the stage1_2 services */
+#include <string>
+#include "../../absyntax/visitor.hh"
 
 
-int stage1_2(const char *filename, symbol_c **tree_root);
-
-
-
-
-
-/* Pragmas written inside a VAR .. END_VAR block (e.g. {attribute 'unit' := 'mm'} right before
- * a variable declaration) are not part of the IEC 61131-3 grammar, so they do not get into the
- * abstract syntax tree. The lexical analyser keeps them, verbatim (including the enclosing braces),
- * in this side table, in the order they were read. 'order' is the token order (see first_order
- * in symbol_c), so a stage 4 may attach each pragma to the declaration that follows it.
- */
-#include <vector>
-typedef struct {
-  long int    order;
-  const char *text;
-} var_decl_pragma_t;
-
-const std::vector<var_decl_pragma_t> &get_var_decl_pragmas(void);
-
-#endif   /* _STAGE1_2_HH */
+#endif /*  _GENERATE_JSON_HH */

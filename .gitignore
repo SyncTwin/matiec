@@ -4,6 +4,7 @@ config.status
 configure
 iec2c
 iec2iec
+/iec2json
 *.o
 **/Makefile.in
 *.Po

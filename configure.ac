@@ -76,7 +76,8 @@ AC_CONFIG_FILES([Makefile \
 	stage3/Makefile \
 	stage4/Makefile \
 	stage4/generate_c/Makefile \
-	stage4/generate_iec/Makefile])
+	stage4/generate_iec/Makefile \
+	stage4/generate_json/Makefile])
 AC_OUTPUT
 
 

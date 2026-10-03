@@ -83,6 +83,18 @@ void rst_preparse_state(void) {preparse_state__ = false;}
 bool get_preparse_state(void) {return preparse_state__;}     // returns true if bison is in preparse state
 
 
+/**************************************************************/
+/* Pragmas found inside VAR .. END_VAR (see stage1_2.hh)      */
+/**************************************************************/
+static std::vector<var_decl_pragma_t> var_decl_pragmas__;
+
+void add_var_decl_pragma(const char *text, long int order) {
+  var_decl_pragma_t pragma = {order, strdup(text)};
+  var_decl_pragmas__.push_back(pragma);
+}
+const std::vector<var_decl_pragma_t> &get_var_decl_pragmas(void) {return var_decl_pragmas__;}
+
+
 /****************************************************/
 /* Controlling the entry to the body_state in flex. */
 /****************************************************/
