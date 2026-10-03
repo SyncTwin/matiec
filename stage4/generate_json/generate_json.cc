@@ -64,6 +64,7 @@
 
 #include "generate_json.hh"
 #include "../../stage1_2/stage1_2.hh"  // for get_var_decl_pragmas()
+#include "../../absyntax_utils/absyntax_utils.hh"  // for search_base_type_c, get_datatype_info_c
 
 
 
@@ -241,12 +242,12 @@ static std::string pragma_text(pragma_c *symbol) {
 
 
 /* Split a '<type> [:= <init>]' node into its type and its initial value. */
-static void split_spec_init(symbol_c *spec_init, std::string &type, std::string &init) {
-  symbol_c *t = spec_init, *i = NULL;
+static void split_spec_init(symbol_c *spec_init, symbol_c *&type, symbol_c *&init) {
+  type = spec_init; init = NULL;
   #define SPLIT(class_name, type_field, init_field)                                   \
     if (NULL != dynamic_cast<class_name *>(spec_init)) {                               \
-      t = dynamic_cast<class_name *>(spec_init)->type_field;                           \
-      i = dynamic_cast<class_name *>(spec_init)->init_field;                           \
+      type = dynamic_cast<class_name *>(spec_init)->type_field;                        \
+      init = dynamic_cast<class_name *>(spec_init)->init_field;                        \
     } else
   SPLIT(simple_spec_init_c,          simple_specification,     constant)
   SPLIT(subrange_spec_init_c,        subrange_specification,   signed_integer)
@@ -259,8 +260,87 @@ static void split_spec_init(symbol_c *spec_init, std::string &type, std::string 
   SPLIT(double_byte_string_spec_c,   string_spec,              double_byte_character_string)
   {/* any other node: no initial value */}
   #undef SPLIT
-  type = iec_text(t);
-  init = iec_text(i);
+}
+
+
+/* A number as JSON text: an integer when it has no fractional part. */
+static std::string json_number(long double value) {
+  char buf[64];
+  if ((value == (long double)(long long)value) && (value < 9e18L) && (value > -9e18L))
+    snprintf(buf, sizeof(buf), "%lld", (long long)value);
+  else
+    snprintf(buf, sizeof(buf), "%.15Lg", value);
+  return buf;
+}
+
+
+/* The value of a TIME literal (T#1m30s, TIME#-2.5ms, ...) in milliseconds, as JSON number text;
+ * "" if 'symbol' is not a TIME literal.
+ */
+static std::string duration_ms(symbol_c *symbol) {
+  duration_c *duration = dynamic_cast<duration_c *>(symbol);
+  if (NULL == duration) return "";
+  interval_c *interval = dynamic_cast<interval_c *>(duration->interval);
+  if (NULL == interval) return "";
+  symbol_c   *fields[5] = {interval->days, interval->hours, interval->minutes, interval->seconds, interval->milliseconds};
+  long double factor[5] = {86400000.0L,    3600000.0L,      60000.0L,          1000.0L,           1.0L};
+  long double total = 0;
+  for (int i = 0; i < 5; i++) {
+    if (NULL == fields[i]) continue;
+    token_c *token = dynamic_cast<token_c *>(fields[i]);
+    if (NULL == token) return "";
+    std::string digits;
+    for (const char *c = token->value; *c != '\0'; c++) if (*c != '_') digits += *c;
+    total += strtold(digits.c_str(), NULL) * factor[i];
+  }
+  if (NULL != duration->neg) total = -total;
+  return json_number(total);
+}
+
+
+/* The data type as resolved by stage 3 (through all the TYPE aliases): the elementary type
+ * (INT, TIME, ...), or the name of the derived type/FB it resolves to, or the text of an anonymous type.
+ */
+static std::string base_type_name(symbol_c *type) {
+  if (NULL == type) return "";
+  symbol_c *base = search_base_type_c::get_basetype_decl(type);
+  if (NULL == base) return iec_text(type);
+  if (get_datatype_info_c::is_ANY_ELEMENTARY(base)) return iec_text(base);
+  symbol_c *base_id = search_base_type_c::get_basetype_id(type);
+  if (NULL != base_id) return iec_text(base_id);
+  return iec_text(base);
+}
+
+/* The kind of a data type, as resolved by stage 3. */
+static std::string type_kind(symbol_c *type) {
+  if (NULL == type) return "unknown";
+  if (NULL != dynamic_cast<single_byte_string_spec_c *>(type)) return "string";
+  if (NULL != dynamic_cast<double_byte_string_spec_c *>(type)) return "string";
+  if (NULL != dynamic_cast<string_type_declaration_c *>(type)) return "string";
+  symbol_c *base = search_base_type_c::get_basetype_decl(type);
+  if (NULL == base)                                     return "unknown";
+  if (get_datatype_info_c::is_function_block(type))     return "function_block";
+  if (get_datatype_info_c::is_subrange(type))           return "subrange";
+  if (get_datatype_info_c::is_enumerated(type))         return "enumerated";
+  if (get_datatype_info_c::is_array(type))              return "array";
+  if (get_datatype_info_c::is_structure(type))          return "structure";
+  if (get_datatype_info_c::is_ref_to(type))             return "ref";
+  if (NULL != dynamic_cast<string_type_declaration_c *>(base)) return "string";
+  if (get_datatype_info_c::is_ANY_ELEMENTARY(base))     return "elementary";
+  return "unknown";
+}
+
+
+/* type, base_type, type_kind, [init, init_ms] of a variable, structure element or TYPE */
+static void set_type_and_init(json_value_c &v, symbol_c *type, symbol_c *init, const char *type_key = "type") {
+  v.set(type_key,    json_value_c::str(iec_text(type)));
+  v.set("base_type", json_value_c::str(base_type_name(type)));
+  v.set("type_kind", json_value_c::str(type_kind(type)));
+  if (NULL != init) {
+    v.set("init", json_value_c::str(iec_text(init)));
+    std::string ms = duration_ms(init);
+    if (!ms.empty()) v.set("init_ms", json_value_c::raw(ms));
+  }
 }
 
 
@@ -331,14 +411,13 @@ class generate_json_c: public iterator_visitor_c {
       return res;
     }
 
-    void add_var(symbol_c *name, std::string type, std::string init, symbol_c *location, const json_value_c &pragmas, std::string edge = "") {
+    void add_var(symbol_c *name, symbol_c *type, symbol_c *init, symbol_c *location, const json_value_c &pragmas, std::string edge = "") {
       if (NULL == vars) return;
       json_value_c v = json_value_c::object();
       std::string var_name = iec_text(name);
       v.set("name",  json_value_c::str(var_name));
       v.set("class", json_value_c::str(var_class));
-      v.set("type",  json_value_c::str(type));
-      if (!init.empty())       v.set("init",     json_value_c::str(init));
+      set_type_and_init(v, type, init);
       if (NULL != location)    v.set("location", json_value_c::str(iec_text(location)));
       if (!var_option.empty()) v.set("option",   json_value_c::str(var_option));
       if (!edge.empty())       v.set("edge",     json_value_c::str(edge));
@@ -348,7 +427,7 @@ class generate_json_c: public iterator_visitor_c {
     }
 
     /* every element of a var1_list / fb_name_list / global_var_list with the same type and init */
-    void add_var_list(symbol_c *decl, symbol_c *name_list, std::string type, std::string init, std::string edge = "") {
+    void add_var_list(symbol_c *decl, symbol_c *name_list, symbol_c *type, symbol_c *init, std::string edge = "") {
       json_value_c pragmas = var_pragmas(decl);
       list_c *list = dynamic_cast<list_c *>(name_list);
       if (NULL == list) {add_var(name_list, type, init, NULL, pragmas, edge); return;}
@@ -386,7 +465,10 @@ class generate_json_c: public iterator_visitor_c {
       begin_pou(symbol, name);
       pou.set("name", json_value_c::str(pou_name));
       pou.set("kind", json_value_c::str(kind));
-      if (NULL != return_type) pou.set("return_type", json_value_c::str(iec_text(return_type)));
+      if (NULL != return_type) {
+        pou.set("return_type",      json_value_c::str(iec_text(return_type)));
+        pou.set("return_base_type", json_value_c::str(base_type_name(return_type)));
+      }
 
       vars = &pou_vars;
       if (NULL != var_declarations) var_declarations->accept(*this);
@@ -428,7 +510,11 @@ class generate_json_c: public iterator_visitor_c {
         a.set("name", json_value_c::str(iec_text(assoc->action_name)));
         action_qualifier_c *q = dynamic_cast<action_qualifier_c *>(assoc->action_qualifier);
         a.set("qualifier", json_value_c::str((NULL == q)? "N" : iec_text(q->action_qualifier)));
-        if ((NULL != q) && (NULL != q->action_time)) a.set("time", json_value_c::str(iec_text(q->action_time)));
+        if ((NULL != q) && (NULL != q->action_time)) {
+          a.set("time", json_value_c::str(iec_text(q->action_time)));
+          std::string ms = duration_ms(q->action_time);
+          if (!ms.empty()) a.set("time_ms", json_value_c::raw(ms));
+        }
         if ((NULL != assoc->indicator_name_list) && (dynamic_cast<list_c *>(assoc->indicator_name_list)->n > 0)) {
           json_value_c ind = json_value_c::array();
           list_c *il = dynamic_cast<list_c *>(assoc->indicator_name_list);
@@ -527,66 +613,66 @@ class generate_json_c: public iterator_visitor_c {
     /* the declarations themselves */
     void *visit(en_param_declaration_c *symbol) {
       if (typeid(*(symbol->method)) != typeid(explicit_definition_c)) return NULL;  // implicit EN
-      std::string type, init;
+      symbol_c *type, *init;
       split_spec_init(symbol->type_decl, type, init);
       add_var(symbol->name, type, init, NULL, var_pragmas(symbol));
       return NULL;
     }
     void *visit(eno_param_declaration_c *symbol) {
       if (typeid(*(symbol->method)) != typeid(explicit_definition_c)) return NULL;  // implicit ENO
-      add_var(symbol->name, iec_text(symbol->type), "", NULL, var_pragmas(symbol));
+      add_var(symbol->name, symbol->type, NULL, NULL, var_pragmas(symbol));
       return NULL;
     }
     void *visit(edge_declaration_c *symbol) {
-      add_var_list(symbol, symbol->var1_list, "BOOL", "", iec_text(symbol->edge));
+      add_var_list(symbol, symbol->var1_list, &get_datatype_info_c::bool_type_name, NULL, iec_text(symbol->edge));
       return NULL;
     }
     void *visit(var1_init_decl_c *symbol) {
-      std::string type, init;
+      symbol_c *type, *init;
       split_spec_init(symbol->spec_init, type, init);
       add_var_list(symbol, symbol->var1_list, type, init);
       return NULL;
     }
     void *visit(array_var_init_decl_c *symbol) {
-      std::string type, init;
+      symbol_c *type, *init;
       split_spec_init(symbol->array_spec_init, type, init);
       add_var_list(symbol, symbol->var1_list, type, init);
       return NULL;
     }
     void *visit(structured_var_init_decl_c *symbol) {
-      std::string type, init;
+      symbol_c *type, *init;
       split_spec_init(symbol->initialized_structure, type, init);
       add_var_list(symbol, symbol->var1_list, type, init);
       return NULL;
     }
     void *visit(fb_name_decl_c *symbol) {
-      std::string type, init;
+      symbol_c *type, *init;
       split_spec_init(symbol->fb_spec_init, type, init);
       add_var_list(symbol, symbol->fb_name_list, type, init);
       return NULL;
     }
     void *visit(array_var_declaration_c *symbol) {
-      add_var_list(symbol, symbol->var1_list, iec_text(symbol->array_specification), "");
+      add_var_list(symbol, symbol->var1_list, symbol->array_specification, NULL);
       return NULL;
     }
     void *visit(structured_var_declaration_c *symbol) {
-      add_var_list(symbol, symbol->var1_list, iec_text(symbol->structure_type_name), "");
+      add_var_list(symbol, symbol->var1_list, symbol->structure_type_name, NULL);
       return NULL;
     }
     void *visit(single_byte_string_var_declaration_c *symbol) {
-      std::string type, init;
+      symbol_c *type, *init;
       split_spec_init(symbol->single_byte_string_spec, type, init);
       add_var_list(symbol, symbol->var1_list, type, init);
       return NULL;
     }
     void *visit(double_byte_string_var_declaration_c *symbol) {
-      std::string type, init;
+      symbol_c *type, *init;
       split_spec_init(symbol->double_byte_string_spec, type, init);
       add_var_list(symbol, symbol->var1_list, type, init);
       return NULL;
     }
     void *visit(located_var_decl_c *symbol) {
-      std::string type, init;
+      symbol_c *type, *init;
       split_spec_init(symbol->located_var_spec_init, type, init);
       location_c *location = dynamic_cast<location_c *>(symbol->location);
       /* an anonymous located variable (AT %IX0.0 : BOOL) is named after its location */
@@ -595,15 +681,15 @@ class generate_json_c: public iterator_visitor_c {
       return NULL;
     }
     void *visit(incompl_located_var_decl_c *symbol) {
-      add_var(symbol->variable_name, iec_text(symbol->var_spec), "", symbol->incompl_location, var_pragmas(symbol));
+      add_var(symbol->variable_name, symbol->var_spec, NULL, symbol->incompl_location, var_pragmas(symbol));
       return NULL;
     }
     void *visit(external_declaration_c *symbol) {
-      add_var(symbol->global_var_name, iec_text(symbol->specification), "", NULL, var_pragmas(symbol));
+      add_var(symbol->global_var_name, symbol->specification, NULL, NULL, var_pragmas(symbol));
       return NULL;
     }
     void *visit(global_var_decl_c *symbol) {
-      std::string type, init;
+      symbol_c *type, *init;
       split_spec_init(symbol->type_specification, type, init);
       global_var_spec_c *spec = dynamic_cast<global_var_spec_c *>(symbol->global_var_spec);
       if (NULL == spec) {  /* global_var_list */
@@ -724,7 +810,11 @@ class generate_json_c: public iterator_visitor_c {
       task_initialization_c *init = dynamic_cast<task_initialization_c *>(symbol->task_initialization);
       if (NULL != init) {
         if (NULL != init->single_data_source)   t.set("single",   json_value_c::str(iec_text(init->single_data_source)));
-        if (NULL != init->interval_data_source) t.set("interval", json_value_c::str(iec_text(init->interval_data_source)));
+        if (NULL != init->interval_data_source) {
+          t.set("interval", json_value_c::str(iec_text(init->interval_data_source)));
+          std::string ms = duration_ms(init->interval_data_source);
+          if (!ms.empty()) t.set("interval_ms", json_value_c::raw(ms));
+        }
         if (NULL != init->priority_data_source) t.set("priority", json_integer(init->priority_data_source));
       }
       res_tasks.push(t);
