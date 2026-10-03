@@ -35,7 +35,8 @@
  * A 4th stage that, instead of generating code, prints a JSON model
  * of the (semantically verified) IEC 61131-3 source program:
  *
- *   { "pous": [ {name, kind, vars[], sfc?, body_st?, body_il?, pragmas[]} ],
+ *   { "types": [ {name, kind, base_type, spec?, init?, init_ms?, values?/dims?/fields?/..., pragmas[]} ],
+ *     "pous": [ {name, kind, vars[], sfc?, body_st?, body_il?, pragmas[]} ],
  *     "configuration": {name, globals[], resources: [{name, type, globals[], tasks[], instances[]}]},
  *     "configurations": [ ... only when the source has more than one CONFIGURATION ... ],
  *     "source_map": { "<pou>/var/<name>": "file:line:col", ... } }
@@ -106,7 +107,10 @@ class json_value_c {
     static json_value_c array(void)         {return json_value_c(j_array);}
     static json_value_c object(void)        {return json_value_c(j_object);}
 
-    json_value_c &set(std::string key, const json_value_c &v) {keys.push_back(key); items.push_back(v); return *this;}
+    json_value_c &set(std::string key, const json_value_c &v) {
+      for (size_t i = 0; i < keys.size(); i++) if (keys[i] == key) {items[i] = v; return *this;}  /* replace */
+      keys.push_back(key); items.push_back(v); return *this;
+    }
     json_value_c &push(const json_value_c &v)                {items.push_back(v); return *this;}
     size_t size(void) {return items.size();}
 
@@ -356,7 +360,7 @@ class generate_json_c: public iterator_visitor_c {
   private:
     stage4out_c &s4o;
 
-    json_value_c pous, configurations, source_map;
+    json_value_c types, pous, configurations, source_map;
 
     /* state while walking the library */
     bool          code_generation_enabled;
@@ -380,6 +384,7 @@ class generate_json_c: public iterator_visitor_c {
 
   public:
     generate_json_c(stage4out_c *s4o_ptr): s4o(*s4o_ptr) {
+      types          = json_value_c::array();
       pous           = json_value_c::array();
       configurations = json_value_c::array();
       source_map     = json_value_c::object();
@@ -559,6 +564,7 @@ class generate_json_c: public iterator_visitor_c {
       }
 
       json_value_c root = json_value_c::object();
+      root.set("types", types);
       root.set("pous", pous);
       root.set("configuration", (configurations.size() > 0)? configurations_first : json_value_c::raw("null"));
       if (configurations.size() > 1) root.set("configurations", configurations);  /* rare: more than one CONFIGURATION */
@@ -571,8 +577,137 @@ class generate_json_c: public iterator_visitor_c {
       return NULL;
     }
 
-    /* data types are not part of the model (yet) */
-    void *visit(data_type_declaration_c *symbol) {pending_pragmas = json_value_c::array(); return NULL;}
+/********************************/
+/* B 1.3.3 - Derived data types */
+/********************************/
+  private:
+    /* name, kind and base type (as resolved by stage 3) and the declared specification and initial value of a TYPE */
+    json_value_c new_type(symbol_c *symbol, symbol_c *name, symbol_c *spec_init) {
+      json_value_c t = json_value_c::object();
+      symbol_c *spec = NULL, *init = NULL;
+      if (NULL != spec_init) split_spec_init(spec_init, spec, init);
+      std::string type_name = iec_text(name);
+      t.set("name",      json_value_c::str(type_name));
+      t.set("kind",      json_value_c::str(type_kind(name)));
+      t.set("base_type", json_value_c::str(base_type_name(name)));
+      if (NULL != spec) t.set("spec", json_value_c::str(iec_text(spec)));
+      if (NULL != init) {
+        t.set("init", json_value_c::str(iec_text(init)));
+        std::string ms = duration_ms(init);
+        if (!ms.empty()) t.set("init_ms", json_value_c::raw(ms));
+      }
+      map_src("type/" + type_name, symbol);
+      return t;
+    }
+
+    void add_type(json_value_c &t) {
+      t.set("pragmas", take_pending_pragmas());  /* library pragmas before TYPE: kept with its first type */
+      types.push(t);
+    }
+
+    static json_value_c subrange_limits(symbol_c *subrange, json_value_c &t) {
+      subrange_c *s = dynamic_cast<subrange_c *>(subrange);
+      if (NULL != s) {t.set("lower", json_integer(s->lower_limit)); t.set("upper", json_integer(s->upper_limit));}
+      return t;
+    }
+
+  public:
+    void *visit(data_type_declaration_c *symbol) {
+      if (NULL != symbol->type_declaration_list) symbol->type_declaration_list->accept(*this);
+      pending_pragmas = json_value_c::array();
+      return NULL;
+    }
+
+    void *visit(simple_type_declaration_c *symbol) {
+      json_value_c t = new_type(symbol, symbol->simple_type_name, symbol->simple_spec_init);
+      add_type(t);
+      return NULL;
+    }
+
+    void *visit(subrange_type_declaration_c *symbol) {
+      json_value_c t = new_type(symbol, symbol->subrange_type_name, symbol->subrange_spec_init);
+      subrange_spec_init_c     *spec_init = dynamic_cast<subrange_spec_init_c *>(symbol->subrange_spec_init);
+      subrange_specification_c *spec      = (NULL == spec_init)? NULL : dynamic_cast<subrange_specification_c *>(spec_init->subrange_specification);
+      if (NULL != spec) subrange_limits(spec->subrange, t);
+      add_type(t);
+      return NULL;
+    }
+
+    void *visit(enumerated_type_declaration_c *symbol) {
+      json_value_c t = new_type(symbol, symbol->enumerated_type_name, symbol->enumerated_spec_init);
+      enumerated_spec_init_c *spec_init = dynamic_cast<enumerated_spec_init_c *>(symbol->enumerated_spec_init);
+      list_c *list = (NULL == spec_init)? NULL : dynamic_cast<enumerated_value_list_c *>(spec_init->enumerated_specification);
+      if (NULL != list) {
+        json_value_c values = json_value_c::array();
+        for (int i = 0; i < list->n; i++) {
+          enumerated_value_c *value = dynamic_cast<enumerated_value_c *>(list->get_element(i));
+          values.push(json_value_c::str(iec_text((NULL != value)? value->value : list->get_element(i))));
+        }
+        t.set("values", values);
+      }
+      add_type(t);
+      return NULL;
+    }
+
+    void *visit(array_type_declaration_c *symbol) {
+      json_value_c t = new_type(symbol, symbol->identifier, symbol->array_spec_init);
+      array_spec_init_c     *spec_init = dynamic_cast<array_spec_init_c *>(symbol->array_spec_init);
+      array_specification_c *spec      = (NULL == spec_init)? NULL : dynamic_cast<array_specification_c *>(spec_init->array_specification);
+      if (NULL != spec) {
+        json_value_c dims = json_value_c::array();
+        list_c *list = dynamic_cast<list_c *>(spec->array_subrange_list);
+        for (int i = 0; (NULL != list) && (i < list->n); i++) {
+          json_value_c dim = json_value_c::object();
+          dims.push(subrange_limits(list->get_element(i), dim));
+        }
+        t.set("dims", dims);
+        t.set("element_type",      json_value_c::str(iec_text(spec->non_generic_type_name)));
+        t.set("element_base_type", json_value_c::str(base_type_name(spec->non_generic_type_name)));
+      }
+      add_type(t);
+      return NULL;
+    }
+
+    void *visit(structure_type_declaration_c *symbol) {
+      list_c *elements = dynamic_cast<structure_element_declaration_list_c *>(symbol->structure_specification);
+      /* STRUCT .. END_STRUCT: no 'spec' text, the elements are listed in 'fields' */
+      json_value_c t = new_type(symbol, symbol->structure_type_name, (NULL != elements)? NULL : symbol->structure_specification);
+      if (NULL != elements) {
+        json_value_c fields = json_value_c::array();
+        for (int i = 0; i < elements->n; i++) {
+          structure_element_declaration_c *element = dynamic_cast<structure_element_declaration_c *>(elements->get_element(i));
+          if (NULL == element) continue;
+          symbol_c *type, *init;
+          split_spec_init(element->spec_init, type, init);
+          json_value_c f = json_value_c::object();
+          f.set("name", json_value_c::str(iec_text(element->structure_element_name)));
+          set_type_and_init(f, type, init);
+          fields.push(f);
+        }
+        t.set("fields", fields);
+      }
+      add_type(t);
+      return NULL;
+    }
+
+    void *visit(string_type_declaration_c *symbol) {
+      json_value_c t = new_type(symbol, symbol->string_type_name, NULL);
+      t.set("base_type", json_value_c::str(iec_text(symbol->elementary_string_type_name)));
+      t.set("spec",      json_value_c::str(iec_text(symbol->elementary_string_type_name)));
+      if (NULL != symbol->string_type_declaration_size) t.set("length", json_integer(symbol->string_type_declaration_size));
+      if (NULL != symbol->string_type_declaration_init) t.set("init",   json_value_c::str(iec_text(symbol->string_type_declaration_init)));
+      add_type(t);
+      return NULL;
+    }
+
+    void *visit(ref_type_decl_c *symbol) {
+      json_value_c t = new_type(symbol, symbol->ref_type_name, symbol->ref_spec_init);
+      ref_spec_init_c *spec_init = dynamic_cast<ref_spec_init_c *>(symbol->ref_spec_init);
+      ref_spec_c      *spec      = (NULL == spec_init)? NULL : dynamic_cast<ref_spec_c *>(spec_init->ref_spec);
+      if (NULL != spec) t.set("ref_to", json_value_c::str(iec_text(spec->type_name)));
+      add_type(t);
+      return NULL;
+    }
 
 
 /**************************************/
