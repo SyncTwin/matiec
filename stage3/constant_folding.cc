@@ -1948,6 +1948,8 @@ void *constant_propagation_c::visit(fb_task_c *symbol) {
 		fb_type_name = search_scope.get_decl(symbol->fb_name);
 	}
 	if (NULL == fb_type_name) ERROR;
+	/* the declaration of a global FB instance is a '<fb_type> [:= <init>]' node, not the FB type name itself */
+	if (NULL != spec_init_sperator_c::get_spec(fb_type_name)) fb_type_name = spec_init_sperator_c::get_spec(fb_type_name);
 	
 	function_block_type_symtable_t::iterator itr = function_block_type_symtable.find(fb_type_name);
 	if (itr == function_block_type_symtable.end()) ERROR; // syntax parsing should not allow this!
