@@ -38,7 +38,7 @@
  *   { "types": [ {name, kind, base_type, spec?, init?, init_ms?, values?/dims?/fields?/..., pragmas[]} ],
  *     "pous": [ {name, kind, vars[], sfc?, body_st?, body_il?, pragmas[]} ],
  *     "configuration": {name, globals[], resources: [{name, type, globals[], tasks[], instances[{.., fb_tasks[], connections[]}]}],
- *                       var_config[]},
+ *                       var_config[], var_access[]},
  *     "configurations": [ ... only when the source has more than one CONFIGURATION ... ],
  *     "source_map": { "<pou>/var/<name>": "file:line:col", ... } }
  *
@@ -934,6 +934,18 @@ class generate_json_c: public iterator_visitor_c {
       return v;
     }
 
+    /* access_name ':' access_path ':' non_generic_type_name [READ_WRITE | READ_ONLY] */
+    json_value_c print_access_declaration(access_declaration_c *symbol) {
+      json_value_c v = json_value_c::object();
+      std::string name = iec_text(symbol->access_name);
+      v.set("name", json_value_c::str(name));
+      v.set("path", json_value_c::str(iec_text(symbol->access_path)));
+      set_type_and_init(v, symbol->type_name, NULL);
+      v.set("direction", json_value_c::str((NULL != dynamic_cast<read_write_c *>(symbol->direction))? "READ_WRITE" : "READ_ONLY"));  /* READ_ONLY is the default */
+      map_src(pou_name + "/var_access/" + name, symbol);
+      return v;
+    }
+
   public:
     void *visit(configuration_declaration_c *symbol) {
       json_value_c conf        = json_value_c::object();
@@ -968,6 +980,16 @@ class generate_json_c: public iterator_visitor_c {
         if (NULL != init) var_config.push(print_instance_specific_init(init));
       }
       conf.set("var_config", var_config);
+
+      /* VAR_ACCESS .. END_VAR */
+      json_value_c var_access = json_value_c::array();
+      access_declarations_c *accesses = dynamic_cast<access_declarations_c *>(symbol->access_declarations);
+      list_c *access_list = (NULL == accesses)? NULL : dynamic_cast<list_c *>(accesses->access_declaration_list);
+      for (int i = 0; (NULL != access_list) && (i < access_list->n); i++) {
+        access_declaration_c *access = dynamic_cast<access_declaration_c *>(access_list->get_element(i));
+        if (NULL != access) var_access.push(print_access_declaration(access));
+      }
+      conf.set("var_access", var_access);
       conf.set("pragmas", take_pending_pragmas());
 
       if (configurations.size() == 0) configurations_first = conf;

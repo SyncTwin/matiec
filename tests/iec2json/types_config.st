@@ -80,6 +80,12 @@ CONFIGURATION Plant
     PROGRAM p1 WITH Fast : Prg (gAx WITH Slow);
     PROGRAM p2 : Prg;
   END_RESOURCE
+  VAR_ACCESS
+    AccCnt  : Cpu.p1.cnt : Speed READ_WRITE;
+    AccMode : gMode : Mode READ_ONLY;
+    AccOut  : Cpu.p1.outw : INT;
+    AccIn   : %IX7.1 : BOOL READ_ONLY;
+  END_VAR
   VAR_CONFIG
     Cpu.p1.spare AT %QX5.0 : BOOL := TRUE;
     Cpu.p1.ax.d : Delay := T#3s;
