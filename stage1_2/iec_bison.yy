@@ -226,6 +226,9 @@ poutype_identifier_c *il_operator_c_2_poutype_identifier_c(symbol_c *il_operator
 /* return if current token is a syntax element */
 /* ERROR_CHECK_BEGIN */
 bool is_current_syntax_token();
+/* used to guard yyerrok against error recovery loops (see %initial-action below) */
+void yyerrok_reset_progress_guard(void);
+bool yyerrok_made_progress(void);
 /* ERROR_CHECK_END */
 
 /* print an error message */
@@ -1475,6 +1478,37 @@ typedef struct YYLTYPE {
 
 %token EXIT
 %token CONTINUE
+
+
+/* ERROR_CHECK_BEGIN */
+/* Protection against infinite error recovery loops.
+ *
+ * Many error rules in this grammar end with the 'error' token and call yyerrok, which tells
+ * bison that error recovery is over and the next syntax error must be reported (instead of
+ * silently discarding the offending look-ahead token). However, such a rule does not consume
+ * the look-ahead token that caused the error. If that same token is also invalid after the rule
+ * has been reduced, bison will detect a new error on the very same token, recover using the same
+ * (or another) error rule, call yyerrok again, and so on, forever. For example, the rule
+ *     sfc_network: sfc_network error {...; yyerrok;}
+ * loops forever printing the same error message whenever the token following the SFC network
+ * is not valid at that point.
+ *
+ * To guarantee that error recovery always makes progress, we replace bison's yyerrok by a version
+ * that is only executed if the current look-ahead token is not the same token that was the
+ * look-ahead the last time yyerrok was executed. When yyerrok is skipped, bison remains in
+ * error recovery mode, and will therefore discard the offending token the next time it detects
+ * a syntax error on it, which guarantees that parsing always advances through the input.
+ *
+ * NOTE: bison #defines yyerrok _after_ the prologue sections, so it can not be re-defined there.
+ *       The %initial-action code is copied to the beginning of yyparse(), which comes after
+ *       bison's own #define yyerrok, and before all the grammar actions that use yyerrok.
+ */
+%initial-action {
+  yyerrok_reset_progress_guard();
+#undef  yyerrok
+#define yyerrok (yyerrok_made_progress()? (void)(yyerrstatus = 0) : (void)0)
+}
+/* ERROR_CHECK_END */
 
 
 %%
@@ -8570,6 +8604,31 @@ void yyerror (const char *error_msg) {
 
 
 /* ERROR_CHECK_BEGIN */
+/* look-ahead token that was current the last time yyerrok was executed. -1 if none. */
+static long int yyerrok_last_lookahead_order = -1;
+
+void yyerrok_reset_progress_guard(void) {
+  yyerrok_last_lookahead_order = -1;
+}
+
+/* Returns true if yyerrok may safely be executed, i.e. if the parser has made some progress
+ * since the last time yyerrok was executed (see the comment above the %initial-action).
+ * Every token returned by flex has a distinct 'order' in its location, so we use it to identify
+ * the look-ahead token.
+ */
+bool yyerrok_made_progress(void) {
+  if (yychar == YYEMPTY) {
+    /* the look-ahead token that triggered the error has already been consumed (or discarded) */
+    yyerrok_last_lookahead_order = -1;
+    return true;
+  }
+  if (yylloc.first_order == yyerrok_last_lookahead_order)
+    return false;  /* same look-ahead token as last time => no progress => do not run yyerrok */
+  yyerrok_last_lookahead_order = yylloc.first_order;
+  return true;
+}
+
+
 bool is_current_syntax_token() {
   switch (yychar) {
     case ';':

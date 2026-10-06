@@ -628,6 +628,13 @@ enable_code_generation_pragma	"{enable code generation}"
 /* Any other pragma... */
 pragma ("{"[^}]*"}")|("{{"([^}]|"}"[^}])*"}}")
 
+/* Attribute pragmas, as used by some IDEs (e.g. {attribute 'name' := 'value'}).
+ * These carry no meaning for code generation, and may appear in places where the
+ * grammar does not accept a pragma (inside VAR blocks, inside SFC, ...). They are
+ * therefore simply ignored by the lexer, as if they were a comment.
+ */
+attribute_pragma	"{"{st_whitespace_char}*"attribute"{st_whitespace_char}[^}]*"}"
+
 
 
 /* COMMENTS */
@@ -987,6 +994,15 @@ incompl_location	%[IQM]\*
 
 	/* We start off by searching for the pragmas we handle in the lexical parser. */
 <INITIAL>{file_include_pragma}	unput_text(0); yy_push_state(include_beg);
+
+	/* Attribute pragmas are ignored (treated like a comment).
+	 * NOTE: these rules must come before the generic {pragma} rules, as both match the same text.
+	 * NOTE: in the (exclusive) body_state the pragma is stored in the body buffer like any other
+	 *       text (see the <body_state>{pragma} rule below), and is later ignored when the buffer
+	 *       is re-scanned in il_state/st_state/sfc_state.
+	 */
+{attribute_pragma}				/* Ignore attribute pragmas */
+<vardecl_list_state>{attribute_pragma}		/* Ignore attribute pragmas */
 
 	/* Pragmas sent to syntax analyser (bison) */
 	/* NOTE: In the vardecl_list_state we only process the pragmas between two consecutive VAR .. END_VAR blocks.
