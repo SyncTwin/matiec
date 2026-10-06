@@ -1,0 +1,8 @@
+FUNCTION_BLOCK fb
+VAR_INPUT i : INT; END_VAR
+VAR_OUTPUT
+  {some_vendor_pragma}
+  o : INT;
+END_VAR
+o := i;
+END_FUNCTION_BLOCK
