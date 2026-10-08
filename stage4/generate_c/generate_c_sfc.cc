@@ -59,6 +59,11 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
 
     std::list<TRANSITION> transition_list;
 
+    /* Actions with at least one non-pulse association (N, S, R, L, D, SD, DS, SL or no qualifier).
+     * Only these get the final scan: a P/P1/P0 action is executed exactly once per edge
+     * (IEC 61131-3 action control), so prev_Q of a pulse-only action stays FALSE. */
+    std::list<symbol_c *> final_scan_actions;
+
     symbol_c *current_step;
     symbol_c *current_action;
     transition_c *current_transition;
@@ -119,6 +124,31 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
       list_c *lst = dynamic_cast<list_c *>(s->step_name_list);
       if (lst != NULL)
         for (int i = 0; i < lst->n; i++) names.push_back(lst->get_element(i));
+    }
+
+    static bool is_pulse_qualifier(const char *q) {
+      return (strcmp(q, "P") == 0) || (strcmp(q, "P1") == 0) || (strcmp(q, "P0") == 0);
+    }
+
+    bool has_final_scan(symbol_c *action_name) {
+      for (std::list<symbol_c *>::iterator a = final_scan_actions.begin(); a != final_scan_actions.end(); a++)
+        if (compare_identifiers(*a, action_name) == 0) return true;
+      return false;
+    }
+
+    void collect_final_scan_actions(symbol_c *association_list) {
+      list_c *lst = dynamic_cast<list_c *>(association_list);
+      if (lst == NULL) return;
+      for (int i = 0; i < lst->n; i++) {
+        action_association_c *aa = dynamic_cast<action_association_c *>(lst->get_element(i));
+        if (aa == NULL) continue;
+        if (aa->action_qualifier != NULL) {
+          action_qualifier_c *aq = dynamic_cast<action_qualifier_c *>(aa->action_qualifier);
+          qualifier_c *q = (aq == NULL) ? NULL : dynamic_cast<qualifier_c *>(aq->action_qualifier);
+          if ((q != NULL) && is_pulse_qualifier(q->value)) continue;
+        }
+        if (!has_final_scan(aa->action_name)) final_scan_actions.push_back(aa->action_name);
+      }
     }
 
     /* TRUE when several transitions leave the step (selection divergence): IEC 61131-3 lets only one of
@@ -240,6 +270,9 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
 
     void *visit(initial_step_c *symbol) {
       switch (wanted_sfcgeneration) {
+        case transitionlist_sg:
+          collect_final_scan_actions(symbol->action_association_list);
+          break;
         case steptmpinit_sg:
           // remember step activity
           // The initial step is active from initialization but becomes activated in the
@@ -320,6 +353,9 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
 
     void *visit(step_c *symbol) {
       switch (wanted_sfcgeneration) {
+        case transitionlist_sg:
+          collect_final_scan_actions(symbol->action_association_list);
+          break;
         case steptmpinit_sg:
           // remember step activity
           s4o.print(s4o.indent_spaces + "IEC_BOOL ");
@@ -523,6 +559,8 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           s4o.print(s4o.indent_spaces + "}\n\n");
           break;
         case actionprevq_sg:
+          /* pulse-only action (P/P1/P0): no final scan, prev_Q stays FALSE from init */
+          if (!has_final_scan(symbol->action_name)) break;
           /* prev_Q = Q: edge memory of the F_TRIG behind the final scan */
           s4o.print(s4o.indent_spaces);
           s4o.print(SET_VAR);
