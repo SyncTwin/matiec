@@ -96,6 +96,7 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
       wanted_sfcgeneration = generation_type;
       switch (wanted_sfcgeneration) {
         case transitiontest_sg:
+        case stepsetreset_sg:
           {
             std::list<TRANSITION>::iterator pt;
             for(pt = transition_list.begin(); pt != transition_list.end(); pt++) {
@@ -108,6 +109,40 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           symbol->accept(*this);
           break;
       }
+    }
+
+    /* Step names of a steps_c (one step or a step name list) */
+    static void get_steps_names(symbol_c *steps, std::list<symbol_c *> &names) {
+      steps_c *s = dynamic_cast<steps_c *>(steps);
+      if (s == NULL) return;
+      if (s->step_name != NULL) {names.push_back(s->step_name); return;}
+      list_c *lst = dynamic_cast<list_c *>(s->step_name_list);
+      if (lst != NULL)
+        for (int i = 0; i < lst->n; i++) names.push_back(lst->get_element(i));
+    }
+
+    /* TRUE when several transitions leave the step (selection divergence): IEC 61131-3 lets only one of
+     * them clear the step in a scan, the first in priority order (PRIORITY, else declaration order). */
+    bool is_divergence_step(symbol_c *step_name) {
+      int n = 0;
+      std::list<TRANSITION>::iterator pt;
+      for (pt = transition_list.begin(); pt != transition_list.end(); pt++) {
+        std::list<symbol_c *> from;
+        get_steps_names(pt->symbol->from_steps, from);
+        for (std::list<symbol_c *>::iterator f = from.begin(); f != from.end(); f++)
+          if (compare_identifiers(*f, step_name) == 0) n++;
+      }
+      return n > 1;
+    }
+
+    /* Selection divergence: <step>__free is TRUE until a transition leaving the step has fired in this
+     * scan; the following transitions of the divergence are then not crossed. A double underscore cannot
+     * occur in an IEC 61131-3 identifier, so the name never collides with a program name. */
+    void print_divergence_free_decl(symbol_c *step_name) {
+      if (!is_divergence_step(step_name)) return;
+      s4o.print(s4o.indent_spaces + "IEC_BOOL ");
+      step_name->accept(*this);
+      s4o.print("__free = 1;\n");
     }
 
     /* Emit per-action init code (Q=0, set=0, reset=0, timer countdowns) */
@@ -222,6 +257,7 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           s4o.print("(");
           print_step_argument(symbol->step_name, "prev_state");
           s4o.print(");\n");
+          print_divergence_free_decl(symbol->step_name);
           break;
         case stepinit_sg:
           /* if (X) T += elapsed_time */
@@ -293,6 +329,7 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           s4o.print("(");
           print_step_argument(symbol->step_name, "X");
           s4o.print(");\n");
+          print_divergence_free_decl(symbol->step_name);
           break;
         case stepinit_sg:
           /* if (X) T += elapsed_time */
@@ -380,11 +417,21 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           symbol->transition_condition->accept(*this);
           break;
         case stepsetreset_sg:
+          {
           current_transition = symbol;
+          std::list<symbol_c *> from, divergence;
+          get_steps_names(symbol->from_steps, from);
+          for (std::list<symbol_c *>::iterator f = from.begin(); f != from.end(); f++)
+            if (is_divergence_step(*f)) divergence.push_back(*f);
           s4o.print(s4o.indent_spaces + "if (");
           wanted_sfcgeneration = transitiontest_sg;
           symbol->from_steps->accept(*this);
           wanted_sfcgeneration = stepreset_sg;
+          for (std::list<symbol_c *>::iterator f = divergence.begin(); f != divergence.end(); f++) {
+            s4o.print(" && ");
+            (*f)->accept(*this);
+            s4o.print("__free");
+          }
           s4o.print(" && ");
           s4o.print(GET_VAR);
           s4o.print("(");
@@ -392,11 +439,17 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           s4o.print(")) {\n");
           s4o.indent_right();
           symbol->from_steps->accept(*this);
+          for (std::list<symbol_c *>::iterator f = divergence.begin(); f != divergence.end(); f++) {
+            s4o.print(s4o.indent_spaces);
+            (*f)->accept(*this);
+            s4o.print("__free = 0;\n");
+          }
           wanted_sfcgeneration = stepset_sg;
           symbol->to_steps->accept(*this);
           s4o.indent_left();
           s4o.print(s4o.indent_spaces + "}\n");
           wanted_sfcgeneration = stepsetreset_sg;
+          }
           break;
         default:
           break;
@@ -957,9 +1010,7 @@ class generate_c_sfc_c: public generate_c_base_and_typeid_c {
 
       /* generate transition set reset steps */
       s4o.print(s4o.indent_spaces + "// Transitions set and reset steps\n");
-      for(i = 0; i < symbol->n; i++) {
-        generate_c_sfc_elements->generate(symbol->get_element(i), generate_c_sfc_elements_c::stepsetreset_sg);
-      }
+      generate_c_sfc_elements->generate((symbol_c *)symbol, generate_c_sfc_elements_c::stepsetreset_sg);
       s4o.print("\n");
 
       /* generate step association */
