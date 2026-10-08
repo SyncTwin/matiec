@@ -49,11 +49,64 @@ static void print_steps_names(stage4out_c &s4o, generate_c_base_and_typeid_c &pr
   }
 }
 
-/* Print a transition variable name: FromStep_TO_ToStep */
+/* TRUE when two steps_c name the same step(s) in the same order */
+static bool same_steps(symbol_c *steps1, symbol_c *steps2) {
+  steps_c *s1 = dynamic_cast<steps_c *>(steps1);
+  steps_c *s2 = dynamic_cast<steps_c *>(steps2);
+  if ((s1 == NULL) || (s2 == NULL)) return false;
+  if ((s1->step_name != NULL) || (s2->step_name != NULL)) {
+    if ((s1->step_name == NULL) || (s2->step_name == NULL)) return false;
+    return compare_identifiers(s1->step_name, s2->step_name) == 0;
+  }
+  list_c *l1 = dynamic_cast<list_c *>(s1->step_name_list);
+  list_c *l2 = dynamic_cast<list_c *>(s2->step_name_list);
+  if ((l1 == NULL) || (l2 == NULL) || (l1->n != l2->n)) return false;
+  for (int i = 0; i < l1->n; i++)
+    if (compare_identifiers(l1->get_element(i), l2->get_element(i)) != 0) return false;
+  return true;
+}
+
+/* Declaration order (1, 2, ...) of an unnamed transition among the unnamed transitions of
+ * the same chart that link the same steps. IEC 61131-3 allows several transitions between
+ * the same pair of steps (e.g. "done" OR "timeout" as two transitions). */
+static int unnamed_transition_ordinal(transition_c *t) {
+  sfc_network_c *network = dynamic_cast<sfc_network_c *>(t->parent);
+  if (network == NULL) return 1;
+  sequential_function_chart_c *chart = dynamic_cast<sequential_function_chart_c *>(network->parent);
+  int n_networks = (chart != NULL) ? chart->n : 1;
+  int ordinal = 0;
+  for (int i = 0; i < n_networks; i++) {
+    sfc_network_c *net = (chart != NULL) ? dynamic_cast<sfc_network_c *>(chart->get_element(i)) : network;
+    if (net == NULL) continue;
+    for (int j = 0; j < net->n; j++) {
+      transition_c *other = dynamic_cast<transition_c *>(net->get_element(j));
+      if ((other == NULL) || (other->transition_name != NULL)) continue;
+      if (!same_steps(other->from_steps, t->from_steps) || !same_steps(other->to_steps, t->to_steps)) continue;
+      ordinal++;
+      if (other == t) return ordinal;
+    }
+  }
+  return 1;
+}
+
+/* Print a transition variable name.
+ *   named transition (TRANSITION name FROM ...): its name;
+ *   unnamed transition: FromStep_TO_ToStep, and FromStep_TO_ToStep__<n> for the n-th (n >= 2)
+ *   unnamed transition between the same steps. A double underscore cannot occur in an
+ *   IEC 61131-3 identifier, so the suffix never collides with a name built from step names. */
 static void print_transition_name(stage4out_c &s4o, generate_c_base_and_typeid_c &printer, transition_c *t) {
+  if (t->transition_name != NULL) {
+    t->transition_name->accept(printer);
+    return;
+  }
   print_steps_names(s4o, printer, t->from_steps, "_");
   s4o.print("_TO_");
   print_steps_names(s4o, printer, t->to_steps, "_");
+  int ordinal = unnamed_transition_ordinal(t);
+  if (ordinal > 1) {
+    s4o.print("__");
+    s4o.print(ordinal);
+  }
 }
 
 class generate_c_sfcdecl_c: protected generate_c_base_and_typeid_c {
