@@ -47,7 +47,8 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
       steptmpinit_sg,
       stepinit_sg,
       actioninit_sg,
-      actionstateeval_sg
+      actionstateeval_sg,
+      actionprevq_sg
     } sfcgeneration_t;
 
   private:
@@ -57,6 +58,11 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
     search_var_instance_decl_c *search_var_instance_decl;
 
     std::list<TRANSITION> transition_list;
+
+    /* Actions with at least one non-pulse association (N, S, R, L, D, SD, DS, SL or no qualifier).
+     * Only these get the final scan: a P/P1/P0 action is executed exactly once per edge
+     * (IEC 61131-3 action control), so prev_Q of a pulse-only action stays FALSE. */
+    std::list<symbol_c *> final_scan_actions;
 
     symbol_c *current_step;
     symbol_c *current_action;
@@ -95,6 +101,7 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
       wanted_sfcgeneration = generation_type;
       switch (wanted_sfcgeneration) {
         case transitiontest_sg:
+        case stepsetreset_sg:
           {
             std::list<TRANSITION>::iterator pt;
             for(pt = transition_list.begin(); pt != transition_list.end(); pt++) {
@@ -107,6 +114,65 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           symbol->accept(*this);
           break;
       }
+    }
+
+    /* Step names of a steps_c (one step or a step name list) */
+    static void get_steps_names(symbol_c *steps, std::list<symbol_c *> &names) {
+      steps_c *s = dynamic_cast<steps_c *>(steps);
+      if (s == NULL) return;
+      if (s->step_name != NULL) {names.push_back(s->step_name); return;}
+      list_c *lst = dynamic_cast<list_c *>(s->step_name_list);
+      if (lst != NULL)
+        for (int i = 0; i < lst->n; i++) names.push_back(lst->get_element(i));
+    }
+
+    static bool is_pulse_qualifier(const char *q) {
+      return (strcmp(q, "P") == 0) || (strcmp(q, "P1") == 0) || (strcmp(q, "P0") == 0);
+    }
+
+    bool has_final_scan(symbol_c *action_name) {
+      for (std::list<symbol_c *>::iterator a = final_scan_actions.begin(); a != final_scan_actions.end(); a++)
+        if (compare_identifiers(*a, action_name) == 0) return true;
+      return false;
+    }
+
+    void collect_final_scan_actions(symbol_c *association_list) {
+      list_c *lst = dynamic_cast<list_c *>(association_list);
+      if (lst == NULL) return;
+      for (int i = 0; i < lst->n; i++) {
+        action_association_c *aa = dynamic_cast<action_association_c *>(lst->get_element(i));
+        if (aa == NULL) continue;
+        if (aa->action_qualifier != NULL) {
+          action_qualifier_c *aq = dynamic_cast<action_qualifier_c *>(aa->action_qualifier);
+          qualifier_c *q = (aq == NULL) ? NULL : dynamic_cast<qualifier_c *>(aq->action_qualifier);
+          if ((q != NULL) && is_pulse_qualifier(q->value)) continue;
+        }
+        if (!has_final_scan(aa->action_name)) final_scan_actions.push_back(aa->action_name);
+      }
+    }
+
+    /* TRUE when several transitions leave the step (selection divergence): IEC 61131-3 lets only one of
+     * them clear the step in a scan, the first in priority order (PRIORITY, else declaration order). */
+    bool is_divergence_step(symbol_c *step_name) {
+      int n = 0;
+      std::list<TRANSITION>::iterator pt;
+      for (pt = transition_list.begin(); pt != transition_list.end(); pt++) {
+        std::list<symbol_c *> from;
+        get_steps_names(pt->symbol->from_steps, from);
+        for (std::list<symbol_c *>::iterator f = from.begin(); f != from.end(); f++)
+          if (compare_identifiers(*f, step_name) == 0) n++;
+      }
+      return n > 1;
+    }
+
+    /* Selection divergence: <step>__free is TRUE until a transition leaving the step has fired in this
+     * scan; the following transitions of the divergence are then not crossed. A double underscore cannot
+     * occur in an IEC 61131-3 identifier, so the name never collides with a program name. */
+    void print_divergence_free_decl(symbol_c *step_name) {
+      if (!is_divergence_step(step_name)) return;
+      s4o.print(s4o.indent_spaces + "IEC_BOOL ");
+      step_name->accept(*this);
+      s4o.print("__free = 1;\n");
     }
 
     /* Emit per-action init code (Q=0, set=0, reset=0, timer countdowns) */
@@ -168,6 +234,22 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
       s4o.print(",,0);\n");
     }
 
+    /* prev_state = GET_VAR(X), after the step's actions were evaluated: prev_state holds
+     * the step activity at the end of the previous scan (edge memory of R_TRIG/F_TRIG used
+     * for 'activated'/'desactivated'), so the initial step set at init is seen as activated
+     * in the first scan. */
+    void print_step_prev_state_update(symbol_c *step_name) {
+      s4o.print(s4o.indent_spaces);
+      s4o.print(SET_VAR);
+      s4o.print("(");
+      print_step_argument(step_name, "prev_state", true);
+      s4o.print(",,");
+      s4o.print(GET_VAR);
+      s4o.print("(");
+      print_step_argument(step_name, "X");
+      s4o.print("));\n");
+    }
+
     void print_set_step(symbol_c *step_name) {
       s4o.print(s4o.indent_spaces);
       s4o.print(SET_VAR);
@@ -188,26 +270,29 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
 
     void *visit(initial_step_c *symbol) {
       switch (wanted_sfcgeneration) {
+        case transitionlist_sg:
+          collect_final_scan_actions(symbol->action_association_list);
+          break;
         case steptmpinit_sg:
           // remember step activity
+          // The initial step is active from initialization but becomes activated in the
+          // first scan (prev_state is 0 after init), like a step set by a transition:
+          // its actions run in that scan and its successor transitions are tested
+          // from the next one (IEC 61131-3, SFC evolution: clearing time is never zero).
           s4o.print(s4o.indent_spaces + "IEC_BOOL ");
           symbol->step_name->accept(*this);
           s4o.print("_X = ");
           s4o.print(GET_VAR);
           s4o.print("(");
           print_step_argument(symbol->step_name, "X");
+          s4o.print(") && ");
+          s4o.print(GET_VAR);
+          s4o.print("(");
+          print_step_argument(symbol->step_name, "prev_state");
           s4o.print(");\n");
+          print_divergence_free_decl(symbol->step_name);
           break;
         case stepinit_sg:
-          /* prev_state = GET_VAR(X) */
-          s4o.print(s4o.indent_spaces);
-          s4o.print(SET_VAR);
-          s4o.print("(");
-          print_step_argument(symbol->step_name, "prev_state", true);
-          s4o.print(",,");
-          symbol->step_name->accept(*this);
-          s4o.print("_X);\n");
-
           /* if (X) T += elapsed_time */
           s4o.print(s4o.indent_spaces + "if (");
           symbol->step_name->accept(*this);
@@ -258,6 +343,7 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
             s4o.indent_left();
             s4o.print(s4o.indent_spaces + "}\n\n");
           }
+          print_step_prev_state_update(symbol->step_name);
           break;
         default:
           break;
@@ -267,6 +353,9 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
 
     void *visit(step_c *symbol) {
       switch (wanted_sfcgeneration) {
+        case transitionlist_sg:
+          collect_final_scan_actions(symbol->action_association_list);
+          break;
         case steptmpinit_sg:
           // remember step activity
           s4o.print(s4o.indent_spaces + "IEC_BOOL ");
@@ -276,17 +365,9 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           s4o.print("(");
           print_step_argument(symbol->step_name, "X");
           s4o.print(");\n");
+          print_divergence_free_decl(symbol->step_name);
           break;
         case stepinit_sg:
-          /* prev_state = GET_VAR(X) */
-          s4o.print(s4o.indent_spaces);
-          s4o.print(SET_VAR);
-          s4o.print("(");
-          print_step_argument(symbol->step_name, "prev_state", true);
-          s4o.print(",,");
-          symbol->step_name->accept(*this);
-          s4o.print("_X);\n");
-
           /* if (X) T += elapsed_time */
           s4o.print(s4o.indent_spaces + "if (");
           symbol->step_name->accept(*this);
@@ -337,6 +418,7 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
             s4o.indent_left();
             s4o.print(s4o.indent_spaces + "}\n\n");
           }
+          print_step_prev_state_update(symbol->step_name);
           break;
         default:
           break;
@@ -371,11 +453,21 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           symbol->transition_condition->accept(*this);
           break;
         case stepsetreset_sg:
+          {
           current_transition = symbol;
+          std::list<symbol_c *> from, divergence;
+          get_steps_names(symbol->from_steps, from);
+          for (std::list<symbol_c *>::iterator f = from.begin(); f != from.end(); f++)
+            if (is_divergence_step(*f)) divergence.push_back(*f);
           s4o.print(s4o.indent_spaces + "if (");
           wanted_sfcgeneration = transitiontest_sg;
           symbol->from_steps->accept(*this);
           wanted_sfcgeneration = stepreset_sg;
+          for (std::list<symbol_c *>::iterator f = divergence.begin(); f != divergence.end(); f++) {
+            s4o.print(" && ");
+            (*f)->accept(*this);
+            s4o.print("__free");
+          }
           s4o.print(" && ");
           s4o.print(GET_VAR);
           s4o.print("(");
@@ -383,11 +475,17 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           s4o.print(")) {\n");
           s4o.indent_right();
           symbol->from_steps->accept(*this);
+          for (std::list<symbol_c *>::iterator f = divergence.begin(); f != divergence.end(); f++) {
+            s4o.print(s4o.indent_spaces);
+            (*f)->accept(*this);
+            s4o.print("__free = 0;\n");
+          }
           wanted_sfcgeneration = stepset_sg;
           symbol->to_steps->accept(*this);
           s4o.indent_left();
           s4o.print(s4o.indent_spaces + "}\n");
           wanted_sfcgeneration = stepsetreset_sg;
+          }
           break;
         default:
           break;
@@ -436,11 +534,22 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           print_action_state_eval(symbol->action_name);
           break;
         case actionbody_sg:
-          s4o.print(s4o.indent_spaces + "if(");
+          /* Executed while A = Q OR F_TRIG(Q) (IEC 61131-3 action control, 'final scan'):
+           * pass 0 runs the actions whose Q fell in this scan (one last execution, the step
+           * flags of the deactivated steps are already FALSE), pass 1 runs the active ones. */
+          s4o.print(s4o.indent_spaces + "if(__sfc_pass ? ");
           s4o.print(GET_VAR);
           s4o.print("(");
           print_action_argument(symbol->action_name, "Q");
-          s4o.print(")) {\n");
+          s4o.print(") : (!");
+          s4o.print(GET_VAR);
+          s4o.print("(");
+          print_action_argument(symbol->action_name, "Q");
+          s4o.print(") && ");
+          s4o.print(GET_VAR);
+          s4o.print("(");
+          print_action_argument(symbol->action_name, "prev_Q");
+          s4o.print("))) {\n");
           s4o.indent_right();
 
           // generate action code
@@ -448,6 +557,20 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
 
           s4o.indent_left();
           s4o.print(s4o.indent_spaces + "}\n\n");
+          break;
+        case actionprevq_sg:
+          /* pulse-only action (P/P1/P0): no final scan, prev_Q stays FALSE from init */
+          if (!has_final_scan(symbol->action_name)) break;
+          /* prev_Q = Q: edge memory of the F_TRIG behind the final scan */
+          s4o.print(s4o.indent_spaces);
+          s4o.print(SET_VAR);
+          s4o.print("(");
+          print_action_argument(symbol->action_name, "prev_Q", true);
+          s4o.print(",,");
+          s4o.print(GET_VAR);
+          s4o.print("(");
+          print_action_argument(symbol->action_name, "Q");
+          s4o.print("));\n");
           break;
         default:
           break;
@@ -693,13 +816,22 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           {
             char *qualifier = (char *)symbol->action_qualifier->accept(*this);
             /* N qualifier */
+            /* An action (not a Boolean variable) has Q cleared in the actions initialization of
+             * every scan and each association only ORs its own contribution into it: the action
+             * control block of IEC 61131-3 computes Q = OR of the associations of all steps, so
+             * an association of a deactivated step must not write Q := 0 over the TRUE written
+             * by an active step that holds the same action (that sent the action to the final
+             * scan on a transition towards a step declared earlier in the chart). */
+            bool or_into_q = !is_variable(current_action);
             if (strcmp(qualifier, "N") == 0) {
               s4o.print(s4o.indent_spaces + "if (active)       ");
               print_set_var_or_action_state(current_action, "1");
               s4o.print(";\n");
-              s4o.print(s4o.indent_spaces + "if (desactivated) ");
-              print_set_var_or_action_state(current_action, "0");
-              s4o.print(";\n");
+              if (!or_into_q) {
+                s4o.print(s4o.indent_spaces + "if (desactivated) ");
+                print_set_var_or_action_state(current_action, "0");
+                s4o.print(";\n");
+              }
               return NULL;
             }
             /* S qualifier */
@@ -735,14 +867,16 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
                 s4o.print(") >= 0) ");
               s4o.print("\n" + s4o.indent_spaces + "                  ");
               print_set_var_or_action_state(current_action, "1");
-              if (strcmp(qualifier, "L") == 0)
-                // in L, we force to zero while state is active and time has been reached
-                // or when the state is deactivated.
-                s4o.print("\n" + s4o.indent_spaces + "else if (desactivated || active)");
-              else
-                s4o.print("\n" + s4o.indent_spaces + "else if (desactivated)");
-              s4o.print("\n" + s4o.indent_spaces + "                  ");
-              print_set_var_or_action_state(current_action, "0");
+              if (!or_into_q) {
+                if (strcmp(qualifier, "L") == 0)
+                  // in L, we force to zero while state is active and time has been reached
+                  // or when the state is deactivated.
+                  s4o.print("\n" + s4o.indent_spaces + "else if (desactivated || active)");
+                else
+                  s4o.print("\n" + s4o.indent_spaces + "else if (desactivated)");
+                s4o.print("\n" + s4o.indent_spaces + "                  ");
+                print_set_var_or_action_state(current_action, "0");
+              }
               s4o.print(";\n");
               return NULL;
             }
@@ -753,15 +887,19 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
               if (strcmp(qualifier, "P0") == 0) {
                 s4o.print(s4o.indent_spaces + "if (desactivated) ");
                 print_set_var_or_action_state(current_action, "1");
-                s4o.print("\n" + s4o.indent_spaces + "else if (activated || active)");
-                print_set_var_or_action_state(current_action, "0");
+                if (!or_into_q) {
+                  s4o.print("\n" + s4o.indent_spaces + "else if (activated || active)");
+                  print_set_var_or_action_state(current_action, "0");
+                }
                 s4o.print(";\n");
               }
               else {
                 s4o.print(s4o.indent_spaces + "if (activated)    ");
                 print_set_var_or_action_state(current_action, "1");
-                s4o.print("\n" + s4o.indent_spaces + "else if (desactivated || active)");
-                print_set_var_or_action_state(current_action, "0");
+                if (!or_into_q) {
+                  s4o.print("\n" + s4o.indent_spaces + "else if (desactivated || active)");
+                  print_set_var_or_action_state(current_action, "0");
+                }
                 s4o.print(";\n");
               }
               return NULL;
@@ -925,9 +1063,7 @@ class generate_c_sfc_c: public generate_c_base_and_typeid_c {
 
       /* generate transition set reset steps */
       s4o.print(s4o.indent_spaces + "// Transitions set and reset steps\n");
-      for(i = 0; i < symbol->n; i++) {
-        generate_c_sfc_elements->generate(symbol->get_element(i), generate_c_sfc_elements_c::stepsetreset_sg);
-      }
+      generate_c_sfc_elements->generate((symbol_c *)symbol, generate_c_sfc_elements_c::stepsetreset_sg);
       s4o.print("\n");
 
       /* generate step association */
@@ -1003,8 +1139,23 @@ class generate_c_sfc_c: public generate_c_base_and_typeid_c {
           }
         }
       }
+      /* Two passes over the action bodies, each body emitted once: first the final scan of
+       * the actions deactivated in this scan, then the active actions (same order as
+       * CODESYS IEC actions), so a value written by an active action wins. */
+      s4o.print(s4o.indent_spaces + "{\n");
+      s4o.indent_right();
+      s4o.print(s4o.indent_spaces + "int __sfc_pass;\n");
+      s4o.print(s4o.indent_spaces + "for (__sfc_pass = 0; __sfc_pass < 2; __sfc_pass++) {\n");
+      s4o.indent_right();
       for(i = 0; i < symbol->n; i++) {
         generate_c_sfc_elements->generate(symbol->get_element(i), generate_c_sfc_elements_c::actionbody_sg);
+      }
+      s4o.indent_left();
+      s4o.print(s4o.indent_spaces + "}\n");
+      s4o.indent_left();
+      s4o.print(s4o.indent_spaces + "}\n");
+      for(i = 0; i < symbol->n; i++) {
+        generate_c_sfc_elements->generate(symbol->get_element(i), generate_c_sfc_elements_c::actionprevq_sg);
       }
       s4o.print("\n");
 
