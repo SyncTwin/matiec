@@ -816,13 +816,22 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           {
             char *qualifier = (char *)symbol->action_qualifier->accept(*this);
             /* N qualifier */
+            /* An action (not a Boolean variable) has Q cleared in the actions initialization of
+             * every scan and each association only ORs its own contribution into it: the action
+             * control block of IEC 61131-3 computes Q = OR of the associations of all steps, so
+             * an association of a deactivated step must not write Q := 0 over the TRUE written
+             * by an active step that holds the same action (that sent the action to the final
+             * scan on a transition towards a step declared earlier in the chart). */
+            bool or_into_q = !is_variable(current_action);
             if (strcmp(qualifier, "N") == 0) {
               s4o.print(s4o.indent_spaces + "if (active)       ");
               print_set_var_or_action_state(current_action, "1");
               s4o.print(";\n");
-              s4o.print(s4o.indent_spaces + "if (desactivated) ");
-              print_set_var_or_action_state(current_action, "0");
-              s4o.print(";\n");
+              if (!or_into_q) {
+                s4o.print(s4o.indent_spaces + "if (desactivated) ");
+                print_set_var_or_action_state(current_action, "0");
+                s4o.print(";\n");
+              }
               return NULL;
             }
             /* S qualifier */
@@ -858,14 +867,16 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
                 s4o.print(") >= 0) ");
               s4o.print("\n" + s4o.indent_spaces + "                  ");
               print_set_var_or_action_state(current_action, "1");
-              if (strcmp(qualifier, "L") == 0)
-                // in L, we force to zero while state is active and time has been reached
-                // or when the state is deactivated.
-                s4o.print("\n" + s4o.indent_spaces + "else if (desactivated || active)");
-              else
-                s4o.print("\n" + s4o.indent_spaces + "else if (desactivated)");
-              s4o.print("\n" + s4o.indent_spaces + "                  ");
-              print_set_var_or_action_state(current_action, "0");
+              if (!or_into_q) {
+                if (strcmp(qualifier, "L") == 0)
+                  // in L, we force to zero while state is active and time has been reached
+                  // or when the state is deactivated.
+                  s4o.print("\n" + s4o.indent_spaces + "else if (desactivated || active)");
+                else
+                  s4o.print("\n" + s4o.indent_spaces + "else if (desactivated)");
+                s4o.print("\n" + s4o.indent_spaces + "                  ");
+                print_set_var_or_action_state(current_action, "0");
+              }
               s4o.print(";\n");
               return NULL;
             }
@@ -876,15 +887,19 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
               if (strcmp(qualifier, "P0") == 0) {
                 s4o.print(s4o.indent_spaces + "if (desactivated) ");
                 print_set_var_or_action_state(current_action, "1");
-                s4o.print("\n" + s4o.indent_spaces + "else if (activated || active)");
-                print_set_var_or_action_state(current_action, "0");
+                if (!or_into_q) {
+                  s4o.print("\n" + s4o.indent_spaces + "else if (activated || active)");
+                  print_set_var_or_action_state(current_action, "0");
+                }
                 s4o.print(";\n");
               }
               else {
                 s4o.print(s4o.indent_spaces + "if (activated)    ");
                 print_set_var_or_action_state(current_action, "1");
-                s4o.print("\n" + s4o.indent_spaces + "else if (desactivated || active)");
-                print_set_var_or_action_state(current_action, "0");
+                if (!or_into_q) {
+                  s4o.print("\n" + s4o.indent_spaces + "else if (desactivated || active)");
+                  print_set_var_or_action_state(current_action, "0");
+                }
                 s4o.print(";\n");
               }
               return NULL;
