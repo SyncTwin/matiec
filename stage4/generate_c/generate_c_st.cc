@@ -56,6 +56,9 @@ class generate_c_st_c: public generate_c_base_and_typeid_c {
     } variablegeneration_t;
 
   private:
+    /* Number of FOR, WHILE and REPEAT loops around the statement being generated. */
+    int loop_depth = 0;
+
     /* When calling a function block, we must first find it's type,
      * by searching through the declarations of the variables currently
      * in scope.
@@ -1446,7 +1449,9 @@ void *visit(for_statement_c *symbol) {
   s4o.indent_right();
 
   /*  the body part  */
+  loop_depth++;
   symbol->statement_list->accept(*this);
+  loop_depth--;
 
   s4o.indent_left();
   s4o.print(s4o.indent_spaces + "}else break;\n");
@@ -1463,7 +1468,9 @@ void *visit(while_statement_c *symbol) {
   symbol->expression->accept(*this);
   s4o.print(") {\n");
   s4o.indent_right();
+  loop_depth++;
   symbol->statement_list->accept(*this);
+  loop_depth--;
   s4o.indent_left();
   s4o.print(s4o.indent_spaces); s4o.print("}");
   return NULL;
@@ -1472,7 +1479,9 @@ void *visit(while_statement_c *symbol) {
 void *visit(repeat_statement_c *symbol) {
   s4o.print("do {\n");
   s4o.indent_right();
+  loop_depth++;
   symbol->statement_list->accept(*this);
+  loop_depth--;
   s4o.indent_left();
   s4o.print(s4o.indent_spaces); s4o.print("} while(!(");
   symbol->expression->accept(*this);
@@ -1481,11 +1490,15 @@ void *visit(repeat_statement_c *symbol) {
 }
 
 void *visit(exit_statement_c *symbol) {
+  /* Outside a loop the C statement would bind to whatever encloses the POU body (the action
+   * passes of an SFC) and silently skip the other actions. */
+  if (loop_depth == 0) STAGE4_ERROR(symbol, symbol, "EXIT outside of a FOR, WHILE or REPEAT loop.");
   s4o.print("break");
   return NULL;
 }
 
 void *visit(continue_statement_c *symbol) {
+  if (loop_depth == 0) STAGE4_ERROR(symbol, symbol, "CONTINUE outside of a FOR, WHILE or REPEAT loop.");
   s4o.print("continue");
   return NULL;
 }

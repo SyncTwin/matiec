@@ -48,6 +48,7 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
       stepinit_sg,
       actioninit_sg,
       actionstateeval_sg,
+      actionfinal_sg,
       actionprevq_sg
     } sfcgeneration_t;
 
@@ -541,15 +542,9 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
           s4o.print(GET_VAR);
           s4o.print("(");
           print_action_argument(symbol->action_name, "Q");
-          s4o.print(") : (!");
-          s4o.print(GET_VAR);
-          s4o.print("(");
-          print_action_argument(symbol->action_name, "Q");
-          s4o.print(") && ");
-          s4o.print(GET_VAR);
-          s4o.print("(");
-          print_action_argument(symbol->action_name, "prev_Q");
-          s4o.print("))) {\n");
+          s4o.print(") : __sfc_final_");
+          symbol->action_name->accept(*this);
+          s4o.print(") {\n");
           s4o.indent_right();
 
           // generate action code
@@ -557,6 +552,24 @@ class generate_c_sfc_elements_c: public generate_c_base_and_typeid_c {
 
           s4o.indent_left();
           s4o.print(s4o.indent_spaces + "}\n\n");
+          break;
+        case actionfinal_sg:
+          /* The falling edge of Q is latched before any body runs: RETURN in a body leaves the
+           * POU and must not leave the edge memory behind. Limitation: RETURN still leaves the
+           * whole POU, so the bodies of the actions after it do not run in that scan.
+           * The double underscore cannot occur in an IEC identifier, so the local never
+           * collides with an action name. */
+          s4o.print(s4o.indent_spaces + "char __sfc_final_");
+          symbol->action_name->accept(*this);
+          s4o.print(" = !");
+          s4o.print(GET_VAR);
+          s4o.print("(");
+          print_action_argument(symbol->action_name, "Q");
+          s4o.print(") && ");
+          s4o.print(GET_VAR);
+          s4o.print("(");
+          print_action_argument(symbol->action_name, "prev_Q");
+          s4o.print(");\n");
           break;
         case actionprevq_sg:
           /* pulse-only action (P/P1/P0): no final scan, prev_Q stays FALSE from init */
@@ -1145,6 +1158,12 @@ class generate_c_sfc_c: public generate_c_base_and_typeid_c {
       s4o.print(s4o.indent_spaces + "{\n");
       s4o.indent_right();
       s4o.print(s4o.indent_spaces + "int __sfc_pass;\n");
+      for(i = 0; i < symbol->n; i++) {
+        generate_c_sfc_elements->generate(symbol->get_element(i), generate_c_sfc_elements_c::actionfinal_sg);
+      }
+      for(i = 0; i < symbol->n; i++) {
+        generate_c_sfc_elements->generate(symbol->get_element(i), generate_c_sfc_elements_c::actionprevq_sg);
+      }
       s4o.print(s4o.indent_spaces + "for (__sfc_pass = 0; __sfc_pass < 2; __sfc_pass++) {\n");
       s4o.indent_right();
       for(i = 0; i < symbol->n; i++) {
@@ -1154,9 +1173,6 @@ class generate_c_sfc_c: public generate_c_base_and_typeid_c {
       s4o.print(s4o.indent_spaces + "}\n");
       s4o.indent_left();
       s4o.print(s4o.indent_spaces + "}\n");
-      for(i = 0; i < symbol->n; i++) {
-        generate_c_sfc_elements->generate(symbol->get_element(i), generate_c_sfc_elements_c::actionprevq_sg);
-      }
       s4o.print("\n");
 
       return NULL;
